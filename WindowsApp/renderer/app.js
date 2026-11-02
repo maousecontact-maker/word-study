@@ -27,14 +27,24 @@ const fmtDayTime = (iso) =>
 /** 94.7%가 95%로 반올림돼 보이지 않도록 내림 */
 const percentOf = (correct, total) => (total === 0 ? 0 : Math.floor((correct * 100) / total));
 
-// MARK: - 발음 (Windows 내장 음성 사용)
+// MARK: - 발음
 
+/**
+ * 1순위: 영어 사전(dictionaryapi.dev)에 있는 원어민 녹음 (미국식 우선)
+ * 2순위: 녹음이 없거나 인터넷이 안 되면 Windows의 영어 음성
+ * 한국어판 Windows에 영어 음성이 없으면 한국어 음성이 영어를 읽게 되므로 설치 방법을 한 번 알려줍니다.
+ */
 const Speaker = {
   voice: null,
+  audio: null,
+  /** 단어 → 녹음 주소 (녹음이 없으면 null). 같은 단어를 다시 물어보지 않도록 기억해 둡니다. */
+  recordings: new Map(),
+  /** 마지막 speak() 호출 번호. 녹음을 받는 사이 다른 단어를 누르면 이전 것은 재생하지 않습니다. */
+  token: 0,
+  hasWarnedNoVoice: false,
 
   pickVoice() {
-    const voices = speechSynthesis.getVoices();
-    const english = voices.filter((v) => v.lang.replace('_', '-').startsWith('en'));
+    const english = speechSynthesis.getVoices().filter((v) => v.lang.replace('_', '-').startsWith('en'));
     this.voice =
       english.find((v) => v.lang.replace('_', '-') === 'en-US' && v.localService) ??
       english.find((v) => v.localService) ??
@@ -42,17 +52,90 @@ const Speaker = {
       null;
   },
 
-  speak(text) {
+  stop() {
+    this.token += 1;
     speechSynthesis.cancel();
+    this.audio?.pause();
+    this.audio = null;
+  },
+
+  async speak(text) {
+    this.stop();
+    const token = this.token;
+    const url = await this.recordingFor(text);
+    if (token !== this.token) return;
+    if (url) {
+      this.audio = new Audio(url);
+      try {
+        await this.audio.play();
+        return;
+      } catch {
+        // 재생 실패 → 아래 음성으로
+      }
+    }
+    this.speakWithVoice(text);
+  },
+
+  speakWithVoice(text) {
     if (!this.voice) this.pickVoice();
+    if (!this.voice) this.warnNoEnglishVoice();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = 'en-US';
     if (this.voice) utterance.voice = this.voice;
     utterance.rate = 0.9;
     speechSynthesis.speak(utterance);
   },
+
+  /** 다음 문제 발음을 미리 받아둬서 넘어갈 때 바로 재생되게 합니다. */
+  prefetch(text) {
+    if (text) this.recordingFor(text);
+  },
+
+  recordingFor(text) {
+    const key = text.trim().toLowerCase();
+    if (!key || key.length > 40 || !/^[a-z' -]+$/.test(key)) return Promise.resolve(null);
+    if (!this.recordings.has(key)) this.recordings.set(key, this.fetchRecording(key));
+    return this.recordings.get(key);
+  },
+
+  async fetchRecording(key) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    try {
+      const response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(key)}`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) return null;
+      const urls = (await response.json())
+        .flatMap((entry) => entry.phonetics ?? [])
+        .map((p) => p.audio)
+        .filter((url) => url?.startsWith('https://'));
+      return urls.find((url) => url.endsWith('-us.mp3')) ?? urls[0] ?? null;
+    } catch {
+      // 인터넷이 없거나 느리면 다음에 다시 시도
+      this.recordings.delete(key);
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  warnNoEnglishVoice() {
+    if (this.hasWarnedNoVoice) return;
+    this.hasWarnedNoVoice = true;
+    showToast(
+      '사전에 녹음이 없는 단어는 Windows 음성으로 읽는데, 영어 음성이 설치돼 있지 않아요. ' +
+        '설정 → 시간 및 언어 → 음성 → "음성 추가"에서 English (United States)를 설치하면 원어민 발음으로 읽어요.',
+    );
+  },
 };
 speechSynthesis.addEventListener('voiceschanged', () => Speaker.pickVoice());
+
+function showToast(message) {
+  const toast = h('div', { class: 'toast', role: 'status', onClick: () => toast.remove() }, message);
+  document.body.append(toast);
+  setTimeout(() => toast.remove(), 12000);
+}
 
 const speakButton = (text) =>
   h('button', {
@@ -81,7 +164,7 @@ function push(screen) {
 
 function pop() {
   if (stack.length > 1) stack.pop();
-  speechSynthesis.cancel();
+  Speaker.stop();
   render();
 }
 
@@ -630,6 +713,7 @@ const Screens = {
       if (word) {
         if (isQuiz) ui.choices = makeChoices(word, engine.pool);
         if (settings.autoSpeak) Speaker.speak(word.term);
+        Speaker.prefetch(engine.questions[engine.index + 1]?.term);
       }
     }
 
