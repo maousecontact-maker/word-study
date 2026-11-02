@@ -1,0 +1,10 @@
+.DS_Store
+
+# Xcode
+xcuserdata/
+DerivedData/
+*.xcuserstate
+
+# Windows 앱 (Electron)
+WindowsApp/node_modules/
+WindowsApp/dist/

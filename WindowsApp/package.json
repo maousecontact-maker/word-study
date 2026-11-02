@@ -1,0 +1,49 @@
+{
+  "name": "word-study",
+  "productName": "단어장",
+  "version": "1.1.0",
+  "description": "영어 단어 암기 (단어장 · 퀴즈 · 타이핑 · 오답 노트)",
+  "author": "Issachar",
+  "repository": "github:maousecontact-maker/word-study",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win nsis --x64 --publish never",
+    "release:win": "electron-builder --win nsis --x64 --publish always"
+  },
+  "build": {
+    "appId": "com.issachar.wordstudy",
+    "publish": {
+      "provider": "github",
+      "owner": "maousecontact-maker",
+      "repo": "word-study",
+      "releaseType": "release"
+    },
+    "toolsets": {
+      "nsis": "1.2.1"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**"
+    ],
+    "win": {
+      "target": "nsis",
+      "executableName": "WordStudy",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "단어장",
+      "artifactName": "WordStudy-Setup-${version}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  }
+}
