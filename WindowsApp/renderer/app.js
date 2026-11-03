@@ -883,13 +883,18 @@ function typingQuestion(screen, word) {
 
 const AUTO_START_SECONDS = 5;
 
-/** 한 회차가 끝났을 때의 결과 화면. 다음 단계가 있으면 몇 초 뒤 자동으로 시작합니다. */
+/**
+ * 한 회차가 끝났을 때의 결과 화면.
+ * 틀린 단어 다시 풀기는 몇 초 뒤 자동으로 시작하고,
+ * 전체 시험은 마음의 준비를 할 수 있도록 버튼을 직접 눌러야 시작합니다.
+ */
 function roundResult(screen) {
   const { engine, ui } = screen;
   const total = engine.questions.length;
   const correct = engine.correctCount;
   const wrongWords = engine.wrongWords;
   const step = engine.nextStep;
+  const autoStarts = step?.kind === 'retryWrong';
   const showsPass = engine.isFullTest;
   const passed = Store.passes(correct, total);
 
@@ -910,14 +915,15 @@ function roundResult(screen) {
     render();
   };
 
+  // 전체 시험은 마지막 답을 Enter로 넘기다 실수로 시작되지 않도록 Enter로는 시작하지 않습니다.
   screen.onKey = (e) => {
-    if (e.key === 'Enter' && step) {
+    if (e.key === 'Enter' && autoStarts) {
       e.preventDefault();
       goNext();
     }
   };
 
-  if (step && !ui.autoStopped) {
+  if (autoStarts && !ui.autoStopped) {
     const timer = setTimeout(() => {
       ui.countdown -= 1;
       if (ui.countdown <= 0) goNext();
@@ -926,12 +932,25 @@ function roundResult(screen) {
     cleanup = () => clearTimeout(timer);
   }
 
-  const countdownMessage = step &&
-    (step.kind === 'retryWrong'
-      ? `${ui.countdown}초 뒤 틀린 ${step.count}개로 ${step.round}회차를 시작해요.`
-      : `오답을 모두 맞혔어요! ${ui.countdown}초 뒤 전체 단어 ${step.count}개 시험을 시작해요.`);
-  const nextTitle = step &&
-    (step.kind === 'retryWrong' ? `↺ 틀린 ${step.count}개 바로 풀기 (Enter)` : `☑ 전체 ${step.count}개 시험 바로 보기 (Enter)`);
+  const nextAction = step && (autoStarts
+    ? [
+        !ui.autoStopped &&
+          h('div', { class: 'row secondary' }, `${ui.countdown}초 뒤 틀린 ${step.count}개로 ${step.round}회차를 시작해요.`),
+        row({ title: `↺ 틀린 ${step.count}개 바로 풀기 (Enter)`, onClick: goNext, className: 'accent' }),
+        !ui.autoStopped &&
+          row({
+            title: '⏸ 자동 시작 멈추기',
+            onClick: () => {
+              ui.autoStopped = true;
+              refresh();
+            },
+          }),
+      ]
+    : h('div', { class: 'start-test' },
+        h('div', { class: 'row-title' }, '오답을 모두 맞혔어요!'),
+        h('div', { class: 'secondary' }, `준비되면 전체 단어 ${step.count}개로 시험을 봐요. 95% 이상 맞히면 통과예요.`),
+        h('button', { class: 'button primary large', onClick: goNext }, `☑ 전체 ${step.count}개 시험 시작`),
+      ));
 
   return h('div', { class: 'result' },
     section({ title: engine.isFullTest ? '전체 시험 결과' : `${engine.round}회차 결과` },
@@ -945,16 +964,7 @@ function roundResult(screen) {
         wrongWords.length === 0 && engine.round > 1 &&
           h('div', { class: 'row-title' }, `${engine.round}회차 만에 모든 단어를 맞혔어요! 💪`),
       ),
-      step && !ui.autoStopped && h('div', { class: 'row secondary' }, countdownMessage),
-      step && row({ title: nextTitle, onClick: goNext, className: 'accent' }),
-      step && !ui.autoStopped &&
-        row({
-          title: '⏸ 자동 시작 멈추기',
-          onClick: () => {
-            ui.autoStopped = true;
-            refresh();
-          },
-        }),
+      nextAction,
       row({ title: '⟳ 처음부터 다시', onClick: restart }),
     ),
     wrongWords.length > 0 && section({ title: '이번에 틀린 단어' }, wrongWords.map((w) => wordRow(w))),
