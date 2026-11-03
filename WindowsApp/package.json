@@ -1,7 +1,7 @@
 {
   "name": "word-study",
   "productName": "단어장",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "영어 단어 암기 (단어장 · 퀴즈 · 타이핑 · 오답 노트)",
   "author": "Issachar",
   "repository": "github:maousecontact-maker/word-study",

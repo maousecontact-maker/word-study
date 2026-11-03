@@ -936,7 +936,7 @@ function roundResult(screen) {
     ? [
         !ui.autoStopped &&
           h('div', { class: 'row secondary' }, `${ui.countdown}초 뒤 틀린 ${step.count}개로 ${step.round}회차를 시작해요.`),
-        row({ title: `↺ 틀린 ${step.count}개 바로 풀기 (Enter)`, onClick: goNext, className: 'accent' }),
+        row({ title: `↺ 틀린 단어 ${step.count}개 바로 다시 풀기 (Enter)`, onClick: goNext, className: 'accent' }),
         !ui.autoStopped &&
           row({
             title: '⏸ 자동 시작 멈추기',
@@ -948,8 +948,8 @@ function roundResult(screen) {
       ]
     : h('div', { class: 'start-test' },
         h('div', { class: 'row-title' }, '오답을 모두 맞혔어요!'),
-        h('div', { class: 'secondary' }, `준비되면 전체 단어 ${step.count}개로 시험을 봐요. 95% 이상 맞히면 통과예요.`),
-        h('button', { class: 'button primary large', onClick: goNext }, `☑ 전체 ${step.count}개 시험 시작`),
+        h('div', { class: 'secondary' }, `준비되면 단어장의 모든 단어(${step.count}개)로 시험을 봐요. 95% 이상 맞히면 통과예요.`),
+        h('button', { class: 'button primary large', onClick: goNext }, `☑ 전체 시험 시작 (단어 ${step.count}개)`),
       ));
 
   return h('div', { class: 'result' },
