@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, session } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -43,30 +43,66 @@ function createWindow() {
   return win;
 }
 
-// 앱을 켤 때 GitHub Releases에 새 버전이 있는지 확인하고, 있으면 몰래 받아둡니다.
-// 다 받으면 지금 다시 시작할지 묻고, 나중에 하면 앱을 끌 때 설치됩니다.
-function checkForUpdates(win) {
+// MARK: - 업데이트
+// 앱을 켤 때, 그리고 "업데이트 확인"을 누를 때 GitHub Releases에서 새 버전을 찾습니다.
+// 있으면 자동으로 받고, 받는 동안 화면 아래에 진행률을 보여줍니다.
+// 다 받으면 "지금 다시 시작"을 누르거나, 앱을 끌 때 설치됩니다.
+//
+// state: idle(아직 확인 안 함) | checking | latest(최신) | downloading | downloaded | error | dev(개발 실행 중)
+let updateStatus = { state: app.isPackaged ? 'idle' : 'dev' };
+let mainWindow = null;
+
+function setUpdateStatus(next) {
+  updateStatus = next;
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:status', updateStatus);
+}
+
+autoUpdater.on('checking-for-update', () => setUpdateStatus({ state: 'checking' }));
+autoUpdater.on('update-not-available', () => setUpdateStatus({ state: 'latest' }));
+autoUpdater.on('update-available', (info) =>
+  setUpdateStatus({ state: 'downloading', version: info.version, percent: 0 }));
+autoUpdater.on('download-progress', (p) =>
+  setUpdateStatus({
+    state: 'downloading',
+    version: updateStatus.version,
+    percent: p.percent,
+    transferred: p.transferred,
+    total: p.total,
+    bytesPerSecond: p.bytesPerSecond,
+  }));
+autoUpdater.on('update-downloaded', (info) => setUpdateStatus({ state: 'downloaded', version: info.version }));
+// 인터넷이 없거나 GitHub에 접속이 안 돼도 앱은 그냥 계속 씁니다.
+autoUpdater.on('error', (error) => {
+  console.error('업데이트 실패:', error?.message ?? error);
+  setUpdateStatus({ state: 'error', version: updateStatus.version, message: String(error?.message ?? error) });
+});
+
+function checkForUpdates() {
   if (!app.isPackaged) return;
-  autoUpdater.on('update-downloaded', async (info) => {
-    const { response } = await dialog.showMessageBox(win, {
-      type: 'info',
-      title: '업데이트',
-      message: `새 버전(${info.version})이 준비됐어요.`,
-      detail: '지금 다시 시작해서 업데이트할까요? 나중에 하면 앱을 끌 때 자동으로 설치돼요.',
-      buttons: ['지금 다시 시작', '나중에'],
-      defaultId: 0,
-      cancelId: 1,
-    });
-    if (response === 0) autoUpdater.quitAndInstall();
-  });
-  // 인터넷이 없거나 GitHub에 접속이 안 돼도 앱은 그냥 계속 씁니다.
-  autoUpdater.on('error', (error) => console.error('업데이트 확인 실패:', error?.message ?? error));
-  autoUpdater.checkForUpdates().catch(() => {});
+  // 이미 확인하거나 받는 중이면 다시 시작하지 않습니다.
+  if (['checking', 'downloading', 'downloaded'].includes(updateStatus.state)) return;
+  autoUpdater.checkForUpdates().catch(() => {}); // 실패는 위의 'error'에서 처리
+}
+
+ipcMain.handle('update:get', () => ({ ...updateStatus, appVersion: app.getVersion() }));
+ipcMain.handle('update:check', () => checkForUpdates());
+ipcMain.handle('update:install', () => {
+  if (updateStatus.state === 'downloaded') autoUpdater.quitAndInstall();
+});
+
+// 위키낱말사전(발음 녹음)은 앱 이름을 밝힌 요청을 권장합니다. 이름 없는 요청은 막힐 수 있어요.
+function identifyToWikimedia() {
+  const userAgent = `WordStudy/${app.getVersion()} (https://github.com/maousecontact-maker/word-study)`;
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['https://*.wiktionary.org/*', 'https://*.wikimedia.org/*'] },
+    (details, callback) => callback({ requestHeaders: { ...details.requestHeaders, 'User-Agent': userAgent } }),
+  );
 }
 
 app.whenReady().then(() => {
-  const win = createWindow();
-  checkForUpdates(win);
+  identifyToWikimedia();
+  mainWindow = createWindow();
+  checkForUpdates();
 });
 
 app.on('window-all-closed', () => app.quit());

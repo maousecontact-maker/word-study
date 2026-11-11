@@ -399,3 +399,24 @@ progress::-webkit-progress-value { background: var(--accent); border-radius: 3px
   text-align: center;
 }
 .start-test .button { margin-top: 6px; }
+
+/* 업데이트 진행 막대 (화면 아래) */
+.update-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  z-index: 35;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(560px, calc(100vw - 32px));
+  padding: 14px 16px;
+  border: 1px solid var(--separator);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  font-size: 14px;
+  transform: translateX(-50%);
+}
+.update-bar-text { display: flex; flex-direction: column; gap: 2px; }
+.update-bar-actions { display: flex; justify-content: flex-end; gap: 8px; }

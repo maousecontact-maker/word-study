@@ -30,14 +30,16 @@ const percentOf = (correct, total) => (total === 0 ? 0 : Math.floor((correct * 1
 // MARK: - 발음
 
 /**
- * 1순위: 영어 사전(dictionaryapi.dev)에 있는 원어민 녹음 (미국식 우선)
- * 2순위: 녹음이 없거나 인터넷이 안 되면 Windows의 영어 음성
+ * 1순위: 위키낱말사전(Wiktionary)에 있는 원어민 녹음 (미국식 우선)
+ * 2순위: 영어 사전(dictionaryapi.dev)의 녹음 (2026-11 기준 녹음 파일 서버가 502 에러라 예비로만 둠)
+ * 3순위: 녹음이 없거나 인터넷이 안 되면 Windows의 영어 음성
+ * 녹음 파일이 안 열리면 다음 후보를 차례로 시도합니다.
  * 한국어판 Windows에 영어 음성이 없으면 한국어 음성이 영어를 읽게 되므로 설치 방법을 한 번 알려줍니다.
  */
 const Speaker = {
   voice: null,
   audio: null,
-  /** 단어 → 녹음 주소 (녹음이 없으면 null). 같은 단어를 다시 물어보지 않도록 기억해 둡니다. */
+  /** 단어 → 녹음 주소 목록. 같은 단어를 다시 물어보지 않도록 기억해 둡니다. */
   recordings: new Map(),
   /** 마지막 speak() 호출 번호. 녹음을 받는 사이 다른 단어를 누르면 이전 것은 재생하지 않습니다. */
   token: 0,
@@ -62,17 +64,18 @@ const Speaker = {
   async speak(text) {
     this.stop();
     const token = this.token;
-    const url = await this.recordingFor(text);
-    if (token !== this.token) return;
-    if (url) {
+    const urls = await this.recordingFor(text);
+    for (const url of urls) {
+      if (token !== this.token) return;
       this.audio = new Audio(url);
       try {
         await this.audio.play();
         return;
       } catch {
-        // 재생 실패 → 아래 음성으로
+        // 이 녹음이 안 열림 → 다음 후보
       }
     }
+    if (token !== this.token) return;
     this.speakWithVoice(text);
   },
 
@@ -91,33 +94,81 @@ const Speaker = {
     if (text) this.recordingFor(text);
   },
 
+  /** "abandon (v)", "give up / quit", "look forward to ~ing" 같은 표기에서 사전에 찾을 부분만 남김 */
+  lookupKey(text) {
+    return text
+      .replace(/\(.*?\)|\[.*?\]/g, ' ')
+      .split(/[\/,;]/)[0]
+      .replace(/~\S*/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  },
+
   recordingFor(text) {
-    const key = text.trim().toLowerCase();
-    if (!key || key.length > 40 || !/^[a-z' -]+$/.test(key)) return Promise.resolve(null);
-    if (!this.recordings.has(key)) this.recordings.set(key, this.fetchRecording(key));
+    const key = this.lookupKey(text);
+    if (!key || key.length > 40 || !/^[a-z' -]+$/.test(key)) return Promise.resolve([]);
+    if (!this.recordings.has(key)) {
+      const lookup = (async () => {
+        const wiktionary = await this.fetchWiktionary(key);
+        if (wiktionary?.length) return wiktionary;
+        const dictionary = await this.fetchDictionaryApi(key);
+        if (wiktionary === null && dictionary === null) this.recordings.delete(key); // 인터넷 문제면 다음에 다시 시도
+        return dictionary ?? [];
+      })();
+      this.recordings.set(key, lookup);
+    }
     return this.recordings.get(key);
   },
 
-  async fetchRecording(key) {
+  /** 주소를 2.5초 안에 못 받으면 포기. 실패하면 null (빈 목록 []은 "녹음 없음") */
+  async fetchJson(url) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 2500);
     try {
-      const response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(key)}`, {
-        signal: controller.signal,
-      });
+      const response = await fetch(url, { signal: controller.signal });
+      if (response.status === 404) return [];
       if (!response.ok) return null;
-      const urls = (await response.json())
-        .flatMap((entry) => entry.phonetics ?? [])
-        .map((p) => p.audio)
-        .filter((url) => url?.startsWith('https://'));
-      return urls.find((url) => url.endsWith('-us.mp3')) ?? urls[0] ?? null;
+      return await response.json();
     } catch {
-      // 인터넷이 없거나 느리면 다음에 다시 시도
-      this.recordings.delete(key);
       return null;
     } finally {
       clearTimeout(timer);
     }
+  },
+
+  async fetchWiktionary(key) {
+    const json = await this.fetchJson(
+      `https://en.wiktionary.org/w/api.php?action=query&prop=images&imlimit=100&format=json&origin=*&titles=${encodeURIComponent(key)}`,
+    );
+    if (json === null) return null;
+    const files = Object.values(json?.query?.pages ?? {})
+      .flatMap((page) => page.images ?? [])
+      .map((image) => image.title.replace(/^File:/, ''))
+      .filter((name) => /\.(ogg|oga|mp3|wav|opus)$/i.test(name));
+    // 영어 녹음만, 미국식 → 영국식 등 다른 영어 → 사용자 녹음(LL-Q1860 = 영어) 순서
+    const rank = (name) => {
+      const lower = name.toLowerCase();
+      if (lower.startsWith('en-us-')) return 0;
+      if (/^ll-q1860 \(eng\)-.*\(usa\)/.test(lower)) return 1;
+      if (/^en-(uk|gb|ca|au|nz|ie)-/.test(lower) || /^en-[^-]+\.(ogg|oga|mp3|wav|opus)$/.test(lower)) return 2;
+      if (lower.startsWith('ll-q1860 (eng)-')) return 3;
+      return null;
+    };
+    return files
+      .map((name) => ({ name, rank: rank(name) }))
+      .filter((f) => f.rank !== null)
+      .sort((a, b) => a.rank - b.rank || a.name.length - b.name.length) // 같은 순위면 "en-us-hello" > "en-us-hello-2"
+      .slice(0, 4)
+      .map((f) => `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(f.name.replace(/ /g, '_'))}`);
+  },
+
+  async fetchDictionaryApi(key) {
+    const json = await this.fetchJson(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(key)}`);
+    if (json === null) return null;
+    if (!Array.isArray(json)) return [];
+    const urls = [...new Set(json.flatMap((entry) => entry.phonetics ?? []).map((p) => p.audio).filter((url) => url?.startsWith('https://')))];
+    return urls.sort((a, b) => b.endsWith('-us.mp3') - a.endsWith('-us.mp3')).slice(0, 2);
   },
 
   warnNoEnglishVoice() {
@@ -493,6 +544,7 @@ const Screens = {
       return h('div', null, top, page(
         emptyState('📕', '단어장이 없어요', '단어 표를 붙여넣으면 단어장이 자동으로 만들어져요.',
           h('button', { class: 'button primary', onClick: () => openImport() }, '단어장 만들기')),
+        updateSection(),
       ));
     }
 
@@ -523,6 +575,7 @@ const Screens = {
           }),
         ),
       ),
+      updateSection(),
     ));
   },
 
@@ -971,6 +1024,106 @@ function roundResult(screen) {
   );
 }
 
+// MARK: - 업데이트
+
+/** 지금 업데이트 상태 (main.js가 바뀔 때마다 보내줌) */
+let updateStatus = { state: 'idle' };
+let appVersion = '';
+/** "업데이트 확인"을 직접 눌렀을 때만 "최신 버전이에요" 같은 결과를 알려줌 */
+let manualUpdateCheck = false;
+/** 다 받은 뒤 "나중에"를 누르면 아래 막대를 숨김 */
+let updateBarHidden = false;
+
+const mb = (bytes) => (bytes / 1024 / 1024).toFixed(1);
+
+function updateStatusText(s = updateStatus) {
+  switch (s.state) {
+    case 'dev': return '개발 모드에서는 업데이트를 확인하지 않아요';
+    case 'checking': return '새 버전 확인 중…';
+    case 'latest': return '최신 버전이에요';
+    case 'downloading': return `새 버전 ${s.version} 받는 중… ${Math.floor(s.percent ?? 0)}%`;
+    case 'downloaded': return `새 버전 ${s.version} 준비 완료 · 다시 시작하면 설치돼요`;
+    case 'error': return '업데이트 확인 실패 · 눌러서 다시 시도';
+    default: return '눌러서 새 버전 확인';
+  }
+}
+
+function checkUpdateNow() {
+  if (updateStatus.state === 'dev') return showToast(updateStatusText());
+  if (updateStatus.state === 'downloaded') return window.updater.install();
+  manualUpdateCheck = true;
+  updateBarHidden = false;
+  window.updater.check();
+}
+
+/** 화면 아래에 붙는 다운로드 진행 막대 (어느 화면에서든 보임) */
+function renderUpdateBar() {
+  document.querySelector('.update-bar')?.remove();
+  const s = updateStatus;
+  const showsError = s.state === 'error' && s.version; // 받다가 실패한 경우만 막대로 보여줌
+  if (updateBarHidden || !(s.state === 'downloading' || s.state === 'downloaded' || showsError)) return;
+
+  let body;
+  if (s.state === 'downloading') {
+    const detail = s.total
+      ? `${mb(s.transferred)} / ${mb(s.total)} MB${s.bytesPerSecond ? ` · ${mb(s.bytesPerSecond)} MB/s` : ''}`
+      : '';
+    body = [
+      h('div', { class: 'update-bar-text' },
+        h('strong', null, `새 버전 ${s.version} 받는 중`),
+        h('span', { class: 'secondary' }, `${Math.floor(s.percent ?? 0)}%${detail ? ` · ${detail}` : ''}`)),
+      h('progress', { max: 100, value: s.percent ?? 0 }),
+    ];
+  } else if (s.state === 'downloaded') {
+    body = [
+      h('div', { class: 'update-bar-text' },
+        h('strong', null, `새 버전 ${s.version} 준비 완료`),
+        h('span', { class: 'secondary' }, '나중에 하면 앱을 끌 때 자동으로 설치돼요.')),
+      h('div', { class: 'update-bar-actions' },
+        h('button', { class: 'button small', onClick: () => { updateBarHidden = true; renderUpdateBar(); } }, '나중에'),
+        h('button', { class: 'button primary small', onClick: () => window.updater.install() }, '지금 다시 시작')),
+    ];
+  } else {
+    body = [
+      h('div', { class: 'update-bar-text' },
+        h('strong', null, '업데이트를 받지 못했어요'),
+        h('span', { class: 'secondary' }, '인터넷 연결을 확인해 주세요.')),
+      h('div', { class: 'update-bar-actions' },
+        h('button', { class: 'button small', onClick: () => { updateBarHidden = true; renderUpdateBar(); } }, '닫기'),
+        h('button', { class: 'button primary small', onClick: checkUpdateNow }, '다시 시도')),
+    ];
+  }
+  document.body.append(h('div', { class: 'update-bar', role: 'status' }, body));
+}
+
+function onUpdateStatus(status) {
+  updateStatus = status;
+  if (status.appVersion) appVersion = status.appVersion;
+  // 홈 화면의 "업데이트 확인" 줄 글자만 바꿈 (화면 전체를 다시 그리지 않음)
+  document.querySelectorAll('.update-status-text').forEach((el) => { el.textContent = updateStatusText(); });
+  if (manualUpdateCheck && (status.state === 'latest' || status.state === 'error')) {
+    manualUpdateCheck = false;
+    showToast(status.state === 'latest' ? `지금 최신 버전(${appVersion})이에요.` : '업데이트를 확인하지 못했어요. 인터넷 연결을 확인해 주세요.');
+  }
+  if (status.state === 'downloading' || status.state === 'downloaded') manualUpdateCheck = false;
+  renderUpdateBar();
+}
+
+function updateSection() {
+  return section({ title: '앱 정보' },
+    row({
+      icon: '⬇️',
+      title: `업데이트 확인${appVersion ? ` (현재 ${appVersion})` : ''}`,
+      subtitle: h('div', { class: 'secondary update-status-text' }, updateStatusText()),
+      onClick: checkUpdateNow,
+    }),
+  );
+}
+
+if (window.updater) {
+  window.updater.onStatus(onUpdateStatus);
+}
+
 // MARK: - 시작
 
-Store.load().then(render);
+Promise.all([Store.load(), window.updater?.get().then(onUpdateStatus)]).then(render);
