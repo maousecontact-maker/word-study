@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, session } = require('electron');
+const { app, BrowserWindow, ipcMain, net, session } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -21,6 +21,43 @@ ipcMain.handle('data:save', (_event, json) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(temp, json, 'utf8');
   fs.renameSync(temp, file);
+});
+
+// MARK: - 발음 녹음 저장
+// 한 번 받은 원어민 녹음은 %APPDATA%\단어장\pronunciations\ 에 저장해서 다음부터 바로 재생합니다.
+const audioDir = () => path.join(app.getPath('userData'), 'pronunciations');
+const audioTypes = { ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', mp3: 'audio/mpeg', wav: 'audio/wav' };
+/** 단어 → 파일 이름 (renderer에서 이미 a-z, ', -, 공백만 남긴 단어가 옴) */
+const audioName = (key) => String(key).toLowerCase().replace(/[^a-z-]/g, '_').slice(0, 60);
+
+ipcMain.handle('audio:load', (_event, key) => {
+  const name = audioName(key);
+  for (const ext of Object.keys(audioTypes)) {
+    try {
+      return { bytes: fs.readFileSync(path.join(audioDir(), `${name}.${ext}`)), type: audioTypes[ext] };
+    } catch {
+      // 이 확장자로는 없음
+    }
+  }
+  return null;
+});
+
+ipcMain.handle('audio:download', async (_event, key, url) => {
+  const ext = new URL(url).pathname.split('.').pop().toLowerCase();
+  if (!url.startsWith('https://') || !audioTypes[ext]) return null;
+  try {
+    const response = await net.fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) return null;
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length < 500 || bytes.length > 3_000_000) return null; // 에러 글자나 너무 큰 파일은 버림
+    fs.mkdirSync(audioDir(), { recursive: true });
+    const file = path.join(audioDir(), `${audioName(key)}.${ext}`);
+    fs.writeFileSync(`${file}.tmp`, bytes);
+    fs.renameSync(`${file}.tmp`, file);
+    return { bytes, type: audioTypes[ext] };
+  } catch {
+    return null;
+  }
 });
 
 function createWindow() {

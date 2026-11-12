@@ -11,3 +11,8 @@ contextBridge.exposeInMainWorld('updater', {
   install: () => ipcRenderer.invoke('update:install'),
   onStatus: (callback) => ipcRenderer.on('update:status', (_event, status) => callback(status)),
 });
+
+contextBridge.exposeInMainWorld('pronunciation', {
+  load: (key) => ipcRenderer.invoke('audio:load', key),
+  download: (key, url) => ipcRenderer.invoke('audio:download', key, url),
+});

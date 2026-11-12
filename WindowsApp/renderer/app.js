@@ -30,17 +30,22 @@ const percentOf = (correct, total) => (total === 0 ? 0 : Math.floor((correct * 1
 // MARK: - 발음
 
 /**
- * 1순위: 위키낱말사전(Wiktionary)에 있는 원어민 녹음 (미국식 우선)
- * 2순위: 영어 사전(dictionaryapi.dev)의 녹음 (2026-11 기준 녹음 파일 서버가 502 에러라 예비로만 둠)
- * 3순위: 녹음이 없거나 인터넷이 안 되면 Windows의 영어 음성
- * 녹음 파일이 안 열리면 다음 후보를 차례로 시도합니다.
- * 한국어판 Windows에 영어 음성이 없으면 한국어 음성이 영어를 읽게 되므로 설치 방법을 한 번 알려줍니다.
+ * 1순위: Windows의 영어 음성 (설치돼 있으면 바로, 인터넷 없이 읽음)
+ * 2순위: 영어 음성이 없거나 읽다가 실패하면 원어민 녹음
+ *   ① PC에 저장해 둔 녹음 (%APPDATA%\\단어장\\pronunciations)
+ *   ② 위키낱말사전(Wiktionary) 녹음 (미국식 우선). 받으면 PC에 저장
+ *   ③ 영어 사전(dictionaryapi.dev) 녹음 (2026-11 기준 녹음 서버가 502 에러라 예비로만 둠)
+ * 3순위: 녹음도 없으면 어쩔 수 없이 다른 음성으로 읽고, 영어 음성 설치 방법을 한 번 알려줍니다.
+ * 영어 음성이 없는 PC에서는 단어장의 단어 녹음을 뒤에서 하나씩 미리 받아둡니다.
  */
 const Speaker = {
   voice: null,
   audio: null,
-  /** 단어 → 녹음 주소 목록. 같은 단어를 다시 물어보지 않도록 기억해 둡니다. */
-  recordings: new Map(),
+  /** 단어 → 재생할 주소(blob:) 또는 null(녹음 없음). 같은 단어를 다시 찾지 않도록 기억해 둡니다. */
+  clips: new Map(),
+  /** 미리 받을 단어 목록 */
+  queue: [],
+  queueRunning: false,
   /** 마지막 speak() 호출 번호. 녹음을 받는 사이 다른 단어를 누르면 이전 것은 재생하지 않습니다. */
   token: 0,
   hasWarnedNoVoice: false,
@@ -61,42 +66,98 @@ const Speaker = {
     this.audio = null;
   },
 
+  hasEnglishVoice() {
+    if (!this.voice) this.pickVoice();
+    return !!this.voice;
+  },
+
   async speak(text) {
     this.stop();
     const token = this.token;
-    const urls = await this.recordingFor(text);
-    for (const url of urls) {
-      if (token !== this.token) return;
-      this.audio = new Audio(url);
+    if (this.hasEnglishVoice()) {
+      // 영어 음성이 읽다가 실패할 때만 녹음으로
+      this.speakWithVoice(text, () => {
+        if (token === this.token) this.playRecording(text, token);
+      });
+      return;
+    }
+    this.playRecording(text, token);
+  },
+
+  /** 원어민 녹음 재생. 녹음이 없으면 다른 음성으로라도 읽음 */
+  async playRecording(text, token) {
+    const clip = await this.clipFor(text);
+    if (token !== this.token) return;
+    if (clip) {
+      this.audio = new Audio(clip);
       try {
         await this.audio.play();
         return;
       } catch {
-        // 이 녹음이 안 열림 → 다음 후보
+        // 재생 실패 → 아래 음성으로
       }
     }
     if (token !== this.token) return;
+    if (!this.hasEnglishVoice()) this.warnNoEnglishVoice();
     this.speakWithVoice(text);
   },
 
-  speakWithVoice(text) {
-    if (!this.voice) this.pickVoice();
-    if (!this.voice) this.warnNoEnglishVoice();
-    const utterance = new SpeechSynthesisUtterance(text);
+  speakWithVoice(text, onError) {
+    // "abandon (v)" → "abandon" 처럼 읽을 부분만
+    const utterance = new SpeechSynthesisUtterance(this.lookupKey(text) || text);
     utterance.lang = 'en-US';
     if (this.voice) utterance.voice = this.voice;
     utterance.rate = 0.9;
+    if (onError) {
+      // 다른 단어를 눌러서 끊긴 건 실패가 아님
+      utterance.onerror = (e) => {
+        if (e.error !== 'interrupted' && e.error !== 'canceled') onError();
+      };
+    }
     speechSynthesis.speak(utterance);
   },
 
-  /** 다음 문제 발음을 미리 받아둬서 넘어갈 때 바로 재생되게 합니다. */
+  /** 다음 문제 발음을 미리 준비해서 넘어갈 때 바로 재생되게 합니다. (영어 음성이 없을 때만 필요) */
   prefetch(text) {
-    if (text) this.recordingFor(text);
+    if (text && !this.hasEnglishVoice()) this.clipFor(text);
+  },
+
+  /** 음성 목록은 앱을 켜고 조금 뒤에 채워지므로 최대 3초 기다림 */
+  voicesReady() {
+    if (speechSynthesis.getVoices().length) return Promise.resolve();
+    return new Promise((resolve) => {
+      speechSynthesis.addEventListener('voiceschanged', resolve, { once: true });
+      setTimeout(resolve, 3000);
+    });
+  },
+
+  /** 여러 단어의 녹음을 뒤에서 하나씩 받아둡니다. (위키 서버에 부담을 주지 않도록 한 번에 하나씩) */
+  prefetchAll(texts) {
+    for (const text of texts) {
+      const key = this.lookupKey(text);
+      if (this.isLookupable(key) && !this.clips.has(key) && !this.queue.includes(key)) this.queue.push(key);
+    }
+    this.runQueue();
+  },
+
+  async runQueue() {
+    if (this.queueRunning || !window.pronunciation) return;
+    this.queueRunning = true;
+    await this.voicesReady();
+    if (this.hasEnglishVoice()) this.queue = []; // 영어 음성으로 읽으니 미리 받을 필요 없음
+    while (this.queue.length) {
+      const key = this.queue.shift();
+      if (this.clips.has(key)) continue;
+      const hadFile = await this.clipForKey(key).then(() => this.fromDisk.has(key));
+      // 인터넷에서 받은 경우에만 잠깐 쉬어감
+      if (!hadFile) await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    this.queueRunning = false;
   },
 
   /** "abandon (v)", "give up / quit", "look forward to ~ing" 같은 표기에서 사전에 찾을 부분만 남김 */
   lookupKey(text) {
-    return text
+    return String(text ?? '')
       .replace(/\(.*?\)|\[.*?\]/g, ' ')
       .split(/[\/,;]/)[0]
       .replace(/~\S*/g, ' ')
@@ -105,26 +166,55 @@ const Speaker = {
       .toLowerCase();
   },
 
-  recordingFor(text) {
+  isLookupable: (key) => !!key && key.length <= 40 && /^[a-z' -]+$/.test(key),
+
+  /** PC에 저장돼 있던 단어 (미리 받기에서 쉬어갈지 판단용) */
+  fromDisk: new Set(),
+
+  clipFor(text) {
     const key = this.lookupKey(text);
-    if (!key || key.length > 40 || !/^[a-z' -]+$/.test(key)) return Promise.resolve([]);
-    if (!this.recordings.has(key)) {
-      const lookup = (async () => {
-        const wiktionary = await this.fetchWiktionary(key);
-        if (wiktionary?.length) return wiktionary;
-        const dictionary = await this.fetchDictionaryApi(key);
-        if (wiktionary === null && dictionary === null) this.recordings.delete(key); // 인터넷 문제면 다음에 다시 시도
-        return dictionary ?? [];
-      })();
-      this.recordings.set(key, lookup);
-    }
-    return this.recordings.get(key);
+    return this.isLookupable(key) ? this.clipForKey(key) : Promise.resolve(null);
   },
 
-  /** 주소를 2.5초 안에 못 받으면 포기. 실패하면 null (빈 목록 []은 "녹음 없음") */
+  clipForKey(key) {
+    if (!this.clips.has(key)) {
+      const lookup = this.findClip(key).then((result) => {
+        if (result === undefined) {
+          this.clips.delete(key); // 인터넷 문제면 다음에 다시 시도
+          return null;
+        }
+        return result;
+      });
+      this.clips.set(key, lookup);
+    }
+    return this.clips.get(key);
+  },
+
+  /** blob 주소 / null(녹음 없음) / undefined(인터넷 문제로 확인 못 함) */
+  async findClip(key) {
+    const toUrl = (file) => URL.createObjectURL(new Blob([file.bytes], { type: file.type }));
+    if (!window.pronunciation) return null;
+    const saved = await window.pronunciation.load(key);
+    if (saved) {
+      this.fromDisk.add(key);
+      return toUrl(saved);
+    }
+    let offline = false;
+    for (const source of [() => this.fetchWiktionary(key), () => this.fetchDictionaryApi(key)]) {
+      const urls = await source();
+      if (urls === null) offline = true;
+      for (const url of urls ?? []) {
+        const file = await window.pronunciation.download(key, url);
+        if (file) return toUrl(file);
+      }
+    }
+    return offline ? undefined : null;
+  },
+
+  /** 주소를 3초 안에 못 받으면 포기. 실패하면 null (빈 목록 []은 "녹음 없음") */
   async fetchJson(url) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2500);
+    const timer = setTimeout(() => controller.abort(), 3000);
     try {
       const response = await fetch(url, { signal: controller.signal });
       if (response.status === 404) return [];
@@ -137,30 +227,30 @@ const Speaker = {
     }
   },
 
+  /** 위키낱말사전 페이지의 녹음 파일 주소를 한 번에 받아옴 (영어 녹음만, 좋은 순서로) */
   async fetchWiktionary(key) {
     const json = await this.fetchJson(
-      `https://en.wiktionary.org/w/api.php?action=query&prop=images&imlimit=100&format=json&origin=*&titles=${encodeURIComponent(key)}`,
+      'https://en.wiktionary.org/w/api.php?action=query&generator=images&gimlimit=100&prop=imageinfo&iiprop=url' +
+        `&format=json&formatversion=2&origin=*&titles=${encodeURIComponent(key)}`,
     );
     if (json === null) return null;
-    const files = Object.values(json?.query?.pages ?? {})
-      .flatMap((page) => page.images ?? [])
-      .map((image) => image.title.replace(/^File:/, ''))
-      .filter((name) => /\.(ogg|oga|mp3|wav|opus)$/i.test(name));
-    // 영어 녹음만, 미국식 → 영국식 등 다른 영어 → 사용자 녹음(LL-Q1860 = 영어) 순서
+    // 미국식 → 다른 영어(영국/호주 등) → 일반인 영어 녹음(LL-Q1860 = 영어) 순서
     const rank = (name) => {
       const lower = name.toLowerCase();
+      if (!/\.(ogg|oga|mp3|wav|opus)$/.test(lower)) return null;
       if (lower.startsWith('en-us-')) return 0;
       if (/^ll-q1860 \(eng\)-.*\(usa\)/.test(lower)) return 1;
-      if (/^en-(uk|gb|ca|au|nz|ie)-/.test(lower) || /^en-[^-]+\.(ogg|oga|mp3|wav|opus)$/.test(lower)) return 2;
+      if (/^en-(uk|gb|ca|au|nz|ie)-/.test(lower) || /^en-[^-]+\.[a-z0-9]+$/.test(lower)) return 2;
       if (lower.startsWith('ll-q1860 (eng)-')) return 3;
       return null;
     };
-    return files
-      .map((name) => ({ name, rank: rank(name) }))
-      .filter((f) => f.rank !== null)
+    return (json?.query?.pages ?? [])
+      .map((page) => ({ name: page.title.replace(/^File:/, ''), url: page.imageinfo?.[0]?.url }))
+      .map((f) => ({ ...f, rank: rank(f.name) }))
+      .filter((f) => f.rank !== null && f.url?.startsWith('https://'))
       .sort((a, b) => a.rank - b.rank || a.name.length - b.name.length) // 같은 순위면 "en-us-hello" > "en-us-hello-2"
-      .slice(0, 4)
-      .map((f) => `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(f.name.replace(/ /g, '_'))}`);
+      .slice(0, 3)
+      .map((f) => f.url.split('?')[0]);
   },
 
   async fetchDictionaryApi(key) {
@@ -586,6 +676,7 @@ const Screens = {
       return Screens[current().type](current());
     }
     const words = Store.words(deck.id);
+    Speaker.prefetchAll(words.map((w) => w.term));
     const records = Store.testRecords(deck.id);
     const resumable = Store.resumableProgress('deck', deck.id);
     const wrongCount = words.filter((w) => w.isWrong).length;
@@ -1126,4 +1217,7 @@ if (window.updater) {
 
 // MARK: - 시작
 
-Promise.all([Store.load(), window.updater?.get().then(onUpdateStatus)]).then(render);
+Promise.all([Store.load(), window.updater?.get().then(onUpdateStatus)]).then(() => {
+  render();
+  Speaker.prefetchAll(Store.decks().flatMap((deck) => Store.words(deck.id).map((w) => w.term)));
+});
