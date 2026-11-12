@@ -136,6 +136,15 @@ function identifyToWikimedia() {
   );
 }
 
+// 단어장은 한 개만 열리게 합니다. 두 번 실행하면 이미 열린 창을 앞으로 가져옵니다.
+// (숨어서 남아 있는 단어장이 있으면 설치할 때 "cannot be closed"가 뜰 수 있어서)
+if (!app.requestSingleInstanceLock()) app.quit();
+app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+});
+
 app.whenReady().then(() => {
   identifyToWikimedia();
   mainWindow = createWindow();
